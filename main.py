@@ -10,11 +10,11 @@ from plots import plot_all
 def main():
     # === CREATE WING GEOMETRY ===
     wing = Wing(
-        wing_area=100,      # m² - reference area
+        wing_area=1,      # m² - reference area
         taper_ratio=0.5,      # tip to root chord ratio
         aspect_ratio=15,     # b²/S
         sweep_angle=15,       # degrees
-        twist=-10               # degrees
+        twist=-3               # degrees
     )
     
     # Print wing parameters
@@ -22,7 +22,7 @@ def main():
     print("\n" + "="*50 + "\n")
     
     # === CREATE WING MESH ===
-    n_span = 50  # Number of spanwise panels
+    n_span = 30  # Number of spanwise panels
     n_chord = 1      # Chordwise panels
     
     mesh = WingMesh(wing, n_span, n_chord, spanwise_spacing="cosine")

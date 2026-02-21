@@ -378,9 +378,7 @@ def plot_spanwise_all(results):
     ax.set_title("Spanwise induced velocity", fontsize=9, fontweight="bold")
     ax.grid(True, alpha=0.3)
     ax.legend(loc="best", fontsize=7, ncol=2)
-    if right_tip_max is not None:
-        current_bottom = ax.get_ylim()[0]
-        ax.set_ylim(bottom=current_bottom, top=right_tip_max)
+
     
     # ===== Bottom-right: Spanwise load decomposition =====
     ax = axes[1, 1]

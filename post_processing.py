@@ -165,79 +165,71 @@ class VLMPostProcessor:
     # ==================================================================
 
     def _compute_trefftz(self):
-        """
-        Compute induced velocity and drag using Trefftz-plane formulation.
-        
-        Based on lifting-line theory:
-            w_j = sum_i ( DeltaGamma_i / (2π (y_j - y_i)) )
-            cdi_j = -cl_j * w_j / 2
-            CDi = sum( cdi_j * S_j ) / S
-        """
-        y = self.spanwise_data["y"]
+
+        y = self.spanwise_data["y"]        # centros de estaciones
         Gamma = self.spanwise_data["gamma"]
         cl = self.spanwise_data["cl"]
 
         S = self.wing.wing_area
         N = len(y)
 
-        # -----------------------------------------------------------
-        # 1) Extend Gamma to enforce zero at tips
-        # -----------------------------------------------------------
-        Gamma_ext = np.zeros(N + 2)
-        Gamma_ext[1:-1] = Gamma
+        # ============================================================
+        # 1) Construcción de circulación neta ΔΓ
+        # ============================================================
 
-        # -----------------------------------------------------------
-        # 2) Build DeltaGamma correctly
-        # -----------------------------------------------------------
-        DeltaGamma = np.diff(Gamma_ext)
+        circulacion_neta = np.zeros(N + 1)
 
-        # -----------------------------------------------------------
-        # 3) Construct extended y array (include tips)
-        # -----------------------------------------------------------
-        y_ext = np.zeros(N + 2)
-        y_ext[1:-1] = y
-        y_ext[0] = y[0] - (y[1] - y[0])
-        y_ext[-1] = y[-1] + (y[-1] - y[-2])
+        circulacion_neta[:-1] = Gamma
+        circulacion_neta[1:] -= Gamma
 
-        # -----------------------------------------------------------
-        # 4) Compute induced velocity
-        # -----------------------------------------------------------
-        w_inducido = np.zeros(N)
+        # ============================================================
+        # 2) Construcción de posiciones de bordes reales
+        # ============================================================
 
-        for j in range(N):
-            for i in range(N + 1):
-                dy = y[j] - y_ext[i]
-                if abs(dy) > 1e-12:
-                    w_inducido[j] += DeltaGamma[i] / (2.0 * np.pi * dy)
-                else:
-                    # Handle singularity (self-induced velocity at station)
-                    w_inducido[j] += 0.0  # No contribution from self-induced velocity
+        y_edges = np.zeros(N + 1)
 
-        # ---------------------------------------------------------------
-        # 5) Compute local induced drag coefficient
-        # ---------------------------------------------------------------
+        # Bordes interiores = puntos medios reales
+        y_edges[1:-1] = 0.5 * (y[:-1] + y[1:])
+
+        # Bordes extremos
+        y_edges[0]  = y[0]  - 0.5 * (y[1] - y[0])
+        y_edges[-1] = y[-1] + 0.5 * (y[-1] - y[-2])
+
+        # ============================================================
+        # 3) Factor correcto (centro - borde)
+        # ============================================================
+
+        dy_matrix = y[None, :] - y_edges[:, None]
+
+        dy_matrix[np.abs(dy_matrix) < 1e-14] = np.inf
+
+        factor = 1.0 / (2.0 * np.pi * dy_matrix)
+
+        # ============================================================
+        # 4) Producto matricial
+        # ============================================================
+
+        w_inducido = circulacion_neta @ factor
+
+        # ============================================================
+        # 5) CDi
+        # ============================================================
+
         cdi_local = -cl * w_inducido / 2.0
 
-        # ---------------------------------------------------------------
-        # 6) Integrate over surface to get total CDi
-        # ---------------------------------------------------------------
-        n_span = self.mesh.n_span
-        n_chord = self.mesh.n_chord
-
-        idx = 0
         area_sections = np.zeros(N)
+        idx = 0
 
-        for i in range(n_span):
+        for i in range(self.mesh.n_span):
             area_section = 0.0
-            for j in range(n_chord):
+            for j in range(self.mesh.n_chord):
                 area_section += self.mesh.panels[idx].area
                 idx += 1
             area_sections[i] = area_section
 
-        # Weighted integration
         CDi = np.sum(cdi_local * area_sections) / S
 
-        # Store induced velocity
+        # Guardamos wi
         self.spanwise_data["w_induced"] = w_inducido
 
         return CDi
