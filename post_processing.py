@@ -98,12 +98,10 @@ class VLMPostProcessor:
 
     def _compute_spanwise(self):
         """
-        Compute sectional lift and moment coefficients from circulation.
-        
-        For lifting-line approach:
-            cl_j = 2 * Gamma_j / c_j
-            cm_origin_j = sectional moment coefficient
+        Compute sectional lift and moment coefficients from circulation
+        using lifting-line discretization.
         """
+
         n_span = self.mesh.n_span
         n_chord = self.mesh.n_chord
 
@@ -114,37 +112,45 @@ class VLMPostProcessor:
 
         idx = 0
 
+        # ============================================================
+        # 1) Reconstruct lifting-line stations from panel data
+        # ============================================================
+
         for i in range(n_span):
 
-            # Accumulate values for this spanwise station
             Gamma_section = 0.0
             chord_section = 0.0
             y_mean = 0.0
             x_quarter_mean = 0.0
 
             for j in range(n_chord):
+
                 panel = self.mesh.panels[idx]
 
+                # Circulation sum along chord
                 Gamma_section += self.gamma[idx]
+
+                # Mean chord at station
                 chord_section += np.linalg.norm(panel.chord_vector)
+
+                # Mean spanwise position
                 y_mean += panel.get_center()[1]
-                
-                # Quarter-chord x-position for moment (use panel's 1/4-chord point)
+
+                # Quarter-chord x-position for moment
                 quarter_chord_point = panel.get_quarter_chord()
                 x_quarter_mean += quarter_chord_point[0]
 
                 idx += 1
 
-            # Average over chordwise panels
+            # Average chordwise quantities
             chord_section /= n_chord
             y_mean /= n_chord
             x_quarter_mean /= n_chord
 
-            # Sectional lift coefficient: cl = 2 * Gamma / c
+            # Sectional lift coefficient (lifting-line)
             cl = 2.0 * Gamma_section / chord_section
 
-            # Sectional moment coefficient about leading edge (lifting-line style)
-            # cm_le = -cl * (x_25 / c)  where x_25 is quarter-chord relative to LE
+            # Sectional moment coefficient about origin (same definition as before)
             cm_le = -cl * (x_quarter_mean / chord_section)
 
             y_list.append(y_mean)
@@ -152,12 +158,48 @@ class VLMPostProcessor:
             gamma_list.append(Gamma_section)
             cm_origin_list.append(cm_le)
 
+        # Convert to arrays
+        y = np.array(y_list)
+        gamma_array = np.array(gamma_list)
+        cl_array = np.array(cl_list)
+        cm_origin_array = np.array(cm_origin_list)
+
+        N = len(y)
+
+        # ============================================================
+        # 2) Construct lifting-line geometric edges
+        # ============================================================
+
+        y_edges = np.zeros(N + 1)
+
+        if N > 1:
+            # Interior edges
+            y_edges[1:-1] = 0.5 * (y[:-1] + y[1:])
+
+            # Boundary edges
+            y_edges[0]  = y[0]  - 0.5 * (y[1] - y[0])
+            y_edges[-1] = y[-1] + 0.5 * (y[-1] - y[-2])
+        else:
+            # Degenerate single-station case
+            span_half = np.abs(y[0])
+            y_edges[0] = -span_half
+            y_edges[1] =  span_half
+
+        # Cell widths
+        dy = np.abs(y_edges[1:] - y_edges[:-1])
+
+        # ============================================================
+        # 3) Store spanwise data
+        # ============================================================
+
         self.spanwise_data = {
-            "y": np.array(y_list),
-            "cl": np.array(cl_list),
-            "gamma": np.array(gamma_list),
-            "cm_origin": np.array(cm_origin_list),
-            "w_induced": np.zeros(n_span)  # Will be filled in _compute_trefftz
+            "y": y,
+            "y_edges": y_edges,
+            "dy": dy,
+            "cl": cl_array,
+            "gamma": gamma_array,
+            "cm_origin": cm_origin_array,
+            "w_induced": np.zeros(N)  # Will be filled in Trefftz step
         }
 
     # ==================================================================
@@ -165,8 +207,12 @@ class VLMPostProcessor:
     # ==================================================================
 
     def _compute_trefftz(self):
+        """
+        Compute induced drag using Trefftz-plane formulation.
+        """
 
-        y = self.spanwise_data["y"]        # centros de estaciones
+        y = self.spanwise_data["y"]
+        y_edges = self.spanwise_data["y_edges"]
         Gamma = self.spanwise_data["gamma"]
         cl = self.spanwise_data["cl"]
 
@@ -174,7 +220,7 @@ class VLMPostProcessor:
         N = len(y)
 
         # ============================================================
-        # 1) Construcción de circulación neta ΔΓ
+        # 1) Circulación neta ΔΓ (torbellinos libres)
         # ============================================================
 
         circulacion_neta = np.zeros(N + 1)
@@ -183,39 +229,31 @@ class VLMPostProcessor:
         circulacion_neta[1:] -= Gamma
 
         # ============================================================
-        # 2) Construcción de posiciones de bordes reales
-        # ============================================================
-
-        y_edges = np.zeros(N + 1)
-
-        # Bordes interiores = puntos medios reales
-        y_edges[1:-1] = 0.5 * (y[:-1] + y[1:])
-
-        # Bordes extremos
-        y_edges[0]  = y[0]  - 0.5 * (y[1] - y[0])
-        y_edges[-1] = y[-1] + 0.5 * (y[-1] - y[-2])
-
-        # ============================================================
-        # 3) Factor correcto (centro - borde)
+        # 2) Kernel Biot–Savart en plano de Trefftz
         # ============================================================
 
         dy_matrix = y[None, :] - y_edges[:, None]
 
+        # Evitar singularidad numérica (mismo tratamiento que antes)
         dy_matrix[np.abs(dy_matrix) < 1e-14] = np.inf
 
         factor = 1.0 / (2.0 * np.pi * dy_matrix)
 
         # ============================================================
-        # 4) Producto matricial
+        # 3) Downwash inducido
         # ============================================================
 
         w_inducido = circulacion_neta @ factor
 
         # ============================================================
-        # 5) CDi
+        # 4) Arrastre inducido local
         # ============================================================
 
         cdi_local = -cl * w_inducido / 2.0
+
+        # ============================================================
+        # 5) Integración sobre área real de cada estación
+        # ============================================================
 
         area_sections = np.zeros(N)
         idx = 0
@@ -229,7 +267,7 @@ class VLMPostProcessor:
 
         CDi = np.sum(cdi_local * area_sections) / S
 
-        # Guardamos wi
+        # Guardamos downwash para análisis posterior
         self.spanwise_data["w_induced"] = w_inducido
 
         return CDi
@@ -240,37 +278,17 @@ class VLMPostProcessor:
 
     def _compute_CL(self):
         """
-        Compute total lift coefficient from circulation distribution.
-        
-        Using lifting-line formula:
-            CL = (2 / S) * integral( Gamma(y) dy )
-        
-        For discrete: CL = (2 / S) * sum( Gamma_j * dy_j )
+        Compute total lift coefficient from circulation distribution
+        using lifting-line formulation.
         """
-        y = self.spanwise_data["y"]
+
         Gamma = self.spanwise_data["gamma"]
+        dy = self.spanwise_data["dy"]
         S = self.wing.wing_area
 
-        N = len(y)
-
-        # Compute dy between consecutive stations using cell-center integration
-        # This ensures correct spanwise distribution and natural decay at wing tips
-        dy = np.zeros(N)
-        if N == 1:
-            dy[0] = 2.0 * np.abs(y[0])  # Full span if only one station
-        else:
-            # First station: integrate from y[0] to midpoint between y[0] and y[1]
-            dy[0] = np.abs(y[1] - y[0]) / 2.0
-            
-            # Internal stations: integrate from midpoint to midpoint
-            for i in range(1, N - 1):
-                dy[i] = np.abs(y[i+1] - y[i-1]) / 2.0
-            
-            # Last station: integrate from midpoint between y[N-2] and y[N-1] to y[N-1]
-            dy[N-1] = np.abs(y[N-1] - y[N-2]) / 2.0
-
-        # CL = 2 * sum(Gamma * dy) / S
-        CL = 2.0 * np.sum(Gamma * dy) / S
+        # Lifting-line integral:
+        # CL = (2 / S) * ∫ Γ(y) dy
+        CL = (2.0 / S) * np.sum(Gamma * dy)
 
         return CL
 

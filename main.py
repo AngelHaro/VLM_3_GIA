@@ -13,7 +13,7 @@ def main():
         wing_area=1,      # m² - reference area
         taper_ratio=0.5,      # tip to root chord ratio
         aspect_ratio=15,     # b²/S
-        sweep_angle=15,       # degrees
+        sweep_angle=20,       # degrees
         twist=-3               # degrees
     )
     
