@@ -81,7 +81,7 @@ class VLMPostProcessor:
         CDi = self._compute_trefftz() 
         
         # Moments
-        CMy_origin, CMy_ac = self._compute_moments(CL)
+        CMy_origin, CMy_ac = self._compute_moments()
         
         return {
             "CL": CL,
@@ -105,62 +105,77 @@ class VLMPostProcessor:
         n_span = self.mesh.n_span
         n_chord = self.mesh.n_chord
 
-        y_list = []
-        cl_list = []
-        gamma_list = []
-        cm_origin_list = []
-
-        idx = 0
-
         # ============================================================
         # 1) Reconstruct lifting-line stations from panel data
         # ============================================================
 
+        # ============================================================
+        # Reorganize circulation into 2D array (span × chord)
+        # ============================================================
+
+        gamma_2D = self.gamma.reshape(n_span, n_chord)
+
+        y_list = []
+        cl_list = []
+        gamma_section_list = []
+        cm_origin_list = []
+
+        panel_idx = 0
+
         for i in range(n_span):
 
             Gamma_section = 0.0
-            chord_section = 0.0
+            area_section = 0.0
+            cl_area_weighted = 0.0
             y_mean = 0.0
-            x_quarter_mean = 0.0
+            moment_area_weighted = 0.0
+            c_section = 0.0
 
             for j in range(n_chord):
 
-                panel = self.mesh.panels[idx]
+                panel = self.mesh.panels[panel_idx]
 
-                # Circulation sum along chord
-                Gamma_section += self.gamma[idx]
+                gamma_ij = gamma_2D[i, j]
 
-                # Mean chord at station
-                chord_section += np.linalg.norm(panel.chord_vector)
+                # Local chord length
+                c_ij = np.linalg.norm(panel.chord_vector)
 
-                # Mean spanwise position
-                y_mean += panel.get_center()[1]
+                # Panel area
+                S_ij = panel.area
 
-                # Quarter-chord x-position for moment
-                quarter_chord_point = panel.get_quarter_chord()
-                x_quarter_mean += quarter_chord_point[0]
+                # Local sectional coeffs
+                cl_ij = 2.0 * gamma_ij / c_ij
+                cm_ij = -cl_ij * (panel.get_quarter_chord()[0] / c_ij)
 
-                idx += 1
+                # Accumulate total circulation per section
+                Gamma_section += gamma_ij
 
-            # Average chordwise quantities
-            chord_section /= n_chord
-            y_mean /= n_chord
-            x_quarter_mean /= n_chord
+                # Area-weighted coeffs
+                cl_area_weighted += cl_ij * S_ij
+                moment_area_weighted += cm_ij * c_ij * S_ij
+                c_section += c_ij
 
-            # Sectional lift coefficient (lifting-line)
-            cl = 2.0 * Gamma_section / chord_section
+                # Area accumulation
+                area_section += S_ij
 
-            # Sectional moment coefficient about origin (same definition as before)
-            cm_le = -cl * (x_quarter_mean / chord_section)
+                # Spanwise coordinate
+                y_mean += panel.get_center()[1] * S_ij
 
-            y_list.append(y_mean)
-            cl_list.append(cl)
-            gamma_list.append(Gamma_section)
-            cm_origin_list.append(cm_le)
+                panel_idx += 1
+
+            # Sectional averaged values
+            cl_section = cl_area_weighted / area_section
+            cm_section = moment_area_weighted / (c_section * area_section)
+            y_section = y_mean / area_section
+
+            y_list.append(y_section)
+            cl_list.append(cl_section)
+            gamma_section_list.append(Gamma_section)
+            cm_origin_list.append(cm_section)
 
         # Convert to arrays
         y = np.array(y_list)
-        gamma_array = np.array(gamma_list)
+        gamma_array = np.array(gamma_section_list)
         cl_array = np.array(cl_list)
         cm_origin_array = np.array(cm_origin_list)
 
@@ -296,60 +311,52 @@ class VLMPostProcessor:
     # MOMENTS
     # ==================================================================
 
-    def _compute_moments(self, CL):
+    def _compute_moments(self):
         """
-        Compute pitching moment about origin and aerodynamic center.
+        Compute pitching moment about origin and aerodynamic center
+        using full lifting-surface integration.
         """
-
-        y = self.spanwise_data["y"]
-        cl = self.spanwise_data["cl"]
 
         S = self.wing.wing_area
         MAC = self.wing.mean_aerodynamic_chord
         x_ac = self.wing.x_ac
 
-        N = len(y)
-
-        n_span = self.mesh.n_span
-        n_chord = self.mesh.n_chord
+        total_moment_origin = 0.0
+        total_lift = 0.0
 
         idx = 0
-        CM_origin_sum = 0.0
 
-        for i in range(n_span):
+        for i in range(self.mesh.n_span):
+            for j in range(self.mesh.n_chord):
 
-            panel = self.mesh.panels[idx]
+                panel = self.mesh.panels[idx]
+                gamma_ij = self.gamma[idx]
 
-            # Local chord
-            c = np.linalg.norm(panel.chord_vector)
+                c_ij = np.linalg.norm(panel.chord_vector)
+                S_ij = panel.area
 
-            # Global quarter-chord x position
-            x_qc = panel.get_quarter_chord()[0]
+                # Local sectional lift coefficient
+                cl_ij = 2.0 * gamma_ij / c_ij
 
-            # Panel area
-            S_panel = panel.area
+                # Quarter-chord x-position
+                x14 = panel.get_quarter_chord()[0]
 
-            # Local sectional lift coefficient
-            cl_local = cl[i]
+                # Local moment coefficient about origin
+                cm_ij = -cl_ij * (x14 / c_ij)
 
-            # Local moment coefficient relative to origin
-            cm_local = -cl_local * (x_qc / c)
+                # Accumulate dimensional contributions
+                total_moment_origin += cm_ij * c_ij * S_ij
+                total_lift += cl_ij * S_ij
 
-            # Add contribution weighted by panel area
-            CM_origin_sum += cm_local * c * S_panel
+                idx += 1
 
-            idx += n_chord
+        # Non-dimensionalize
+        CMy_origin = total_moment_origin / (S * MAC)
 
-        # Final coefficient
-        CMy_origin = CM_origin_sum / (S * MAC)
-
-        # Moment about aerodynamic center
-        CMy_ac = CMy_origin - CL * (x_ac / MAC)
+        CL_surface = total_lift / S
+        CMy_ac = CMy_origin - CL_surface * (x_ac / MAC)
 
         return CMy_origin, CMy_ac
-
-
-
 
 
 class AlphaSweep:
